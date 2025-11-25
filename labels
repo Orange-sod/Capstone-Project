@@ -1,0 +1,35 @@
+BASIC DATA:
+recommendationid,
+appid, (id of game)
+author_steamid,
+game, (name of game)
+
+REVIEWER DATA:
+author_num_games_owned,
+author_num_reviews,
+author_playtime_forever,
+author_playtime_last_two_weeks,
+author_playtime_at_review,
+author_last_played,
+steam_purchase, (if the user purchased the game on Steam)
+received_for_free,
+
+BERT LANGUAGE:
+language,
+review,
+
+REVIEW METADATA:
+timestamp_created,
+timestamp_updated,
+voted_up, (recommend / not recommend)
+votes_up, (by other users)
+votes_funny,
+comment_count, (comment on review)
+written_during_early_access,
+
+OUTPUT:
+weighted_vote_score,
+
+MAYBE DISMISSED:
+steam_china_location (maybe clear) [which part of china is the reviewer)
+hidden_in_steam_china,
