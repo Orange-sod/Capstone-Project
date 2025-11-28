@@ -2,7 +2,7 @@ import polars as pl
 import os
 
 PARQUET_PATH = 'all_reviews_raw.parquet'
-OUTPUT_PATH = "processed_reviews_dataset_polars.parquet"
+OUTPUT_PATH = "processed_reviews_polars.parquet"
 
 print("Polars: Initializing Lazy execution plan...")
 
@@ -36,8 +36,8 @@ print('Phase 1 (Cleaning) logic defined.')
 # .cast(pl.Int64) to ensure it's Long type，following PyTorch demand
 
 cleaned_lf = cleaned_lf.with_columns([
-    pl.col("author_steamid").cast(pl.Categorical).to_physical().cast(pl.Int64).alias("user_index"),
-    pl.col("appid").cast(pl.Categorical).to_physical().cast(pl.Int64).alias("game_index")
+    pl.col("author_steamid").cast(pl.String).cast(pl.Categorical).to_physical().alias("user_index"),
+    pl.col("appid").cast(pl.String).cast(pl.Categorical).to_physical().alias("game_index")
 ])
 
 print('Phase 2 (Indexing) logic defined.')
