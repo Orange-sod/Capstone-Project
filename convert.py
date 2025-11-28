@@ -27,7 +27,7 @@ def main():
                             quote='"',
                             escape='"',
                             multiLine=True)
-        print("✅ CSV read！")
+        print(" CSV read！")
     except Exception as e:
         print(f" Err reading file: {e}")
         spark.stop()

@@ -1,3 +1,8 @@
+import os
+import sys
+os.environ['HADOOP_HOME'] = "C:\\hadoop"
+sys.path.append("C:\\hadoop\\bin")
+
 import pyspark.sql.functions as F
 from pyspark.sql.types import IntegerType, FloatType, DoubleType
 from pyspark.ml.feature import StringIndexer
@@ -5,7 +10,7 @@ from pyspark.sql import SparkSession
 
 spark = SparkSession.builder \
     .appName("SteamDataPreprocessing") \
-    .config("spark.driver.memory", "8g") \
+    .config("spark.driver.memory", "16g") \
     .config("spark.kryoserializer.buffer.max", "1g") \
     .master("local[*]") \
     .getOrCreate()
