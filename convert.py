@@ -1,43 +1,37 @@
+import polars as pl
 import os
-import sys
-os.environ['HADOOP_HOME'] = "C:\\hadoop"
-sys.path.append("C:\\hadoop\\bin")
+import time
 
-import pyspark
-from pyspark.sql import SparkSession
-
-#create spark session
 def main():
-    spark = SparkSession.builder \
-        .appName("DataConverter") \
-        .master("local[*]") \
-        .config("spark.driver.memory", "12g") \
-        .getOrCreate()
-
-    print(f"Spark Web UI: {spark.sparkContext.uiWebUrl}")
-
+    # path configuration
     csv_path = "all_reviews.csv"
     parquet_path = "all_reviews_raw.parquet"
 
-    #read csv data
-    try:
-        df = spark.read.csv(csv_path,
-                            header=True,
-                            inferSchema=True,
-                            quote='"',
-                            escape='"',
-                            multiLine=True)
-        print(" CSV read！")
-    except Exception as e:
-        print(f" Err reading file: {e}")
-        spark.stop()
-        return
+    print(f"Polars: Starting conversion from {csv_path} to {parquet_path}...")
+    start_time = time.time()
 
-    print("Converting...")
-    #drop unneeded columns
-    df.write.mode('overwrite').parquet(parquet_path)
-    print('succeeded')
-    spark.stop()
+    try:
+        lf = pl.scan_csv(
+            csv_path,
+            infer_schema_length=10000,
+            ignore_errors=False,
+            quote_char='"',
+        )
+
+        print("Schema inferred. Starting streaming conversion...")
+        lf.sink_parquet(parquet_path)
+
+        end_time = time.time()
+        duration = end_time - start_time
+
+        print(f"Success! Conversion completed in {duration:.2f} seconds.")
+        print(f"Output saved to: {parquet_path}")
+
+        file_size = os.path.getsize(parquet_path) / (1024 * 1024)
+        print(f"File Size: {file_size:.2f} MB")
+
+    except Exception as e:
+        print(f"Error during conversion: {e}")
 
 if __name__ == "__main__":
     main()

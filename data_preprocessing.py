@@ -1,125 +1,116 @@
+import polars as pl
 import os
-import sys
-os.environ['HADOOP_HOME'] = "C:\\hadoop"
-sys.path.append("C:\\hadoop\\bin")
-
-import pyspark.sql.functions as F
-from pyspark.sql.types import IntegerType, FloatType, DoubleType
-from pyspark.ml.feature import StringIndexer
-from pyspark.sql import SparkSession
-
-spark = SparkSession.builder \
-    .appName("SteamDataPreprocessing") \
-    .config("spark.driver.memory", "16g") \
-    .config("spark.kryoserializer.buffer.max", "1g") \
-    .master("local[*]") \
-    .getOrCreate()
-
-print('spark session created')
-print(f"Spark Web UI: {spark.sparkContext.uiWebUrl}")
 
 PARQUET_PATH = 'all_reviews_raw.parquet'
-df = spark.read.parquet(PARQUET_PATH)
-print('finished reading')
+OUTPUT_PATH = "processed_reviews_dataset_polars.parquet"
 
-# Phase 1:(Basic Cleaning)
+print("Polars: Initializing Lazy execution plan...")
+
+# 1. use scan_parquet to start the Lazy mode
+# will not read the file, only start up a plan
+lf = pl.scan_parquet(PARQUET_PATH)
+
+# Phase 1: Basic Cleaning
 # Drop columns:
 # steam_china_location: indicates which part in China is the review posted, useless.
 # hidden_in_steam_china: indicates if the game is published in China, noise
 # comment_count: a new review has no comments, unrelated label
 # game: we have appid as the identification for the game, this is redundant
-cols_to_drop = ["steam_china_location", "hidden_in_steam_china","comment_count","game"]
+cols_to_drop = ["steam_china_location", "hidden_in_steam_china", "comment_count", "game"]
 
+# build the table
 # limit language to english since longformer only support english version
 # drop very short reviews to get rid of memes or meaningless reviews.
-cleaned_df = df.drop(*cols_to_drop) \
-    .filter(F.col("language") == "english") \
-    .filter(F.length(F.col("review")) > 50) \
-    .filter(F.col("review").isNotNull()) \
-    .filter(F.col("weighted_vote_score").isNotNull())
+cleaned_lf = (
+    lf.drop(cols_to_drop)
+    .filter(pl.col("language") == "english")
+    .filter(pl.col("review").str.len_chars() > 50)
+    .filter(pl.col("review").is_not_null())
+    .filter(pl.col("weighted_vote_score").is_not_null())
+)
 
-print('End of Phase 1')
+print('Phase 1 (Cleaning) logic defined.')
 
 # Phase 2: Graph Indexing
-# HGAT needs dense index such as 0, 1, 2...
-# Use StringIndexer to project raw id into integer index
+# Categorical will automatically build the mapping dictionary, to_physical will convert it to ints like 0, 1, 2...
+# .cast(pl.Int64) to ensure it's Long type，following PyTorch demand
 
-# 2.1 User ID -> user_index
-user_indexer = StringIndexer(inputCol="author_steamid", outputCol="user_index", handleInvalid="skip")
-user_indexer_model = user_indexer.fit(cleaned_df)
-cleaned_df = user_indexer_model.transform(cleaned_df)
+cleaned_lf = cleaned_lf.with_columns([
+    pl.col("author_steamid").cast(pl.Categorical).to_physical().cast(pl.Int64).alias("user_index"),
+    pl.col("appid").cast(pl.Categorical).to_physical().cast(pl.Int64).alias("game_index")
+])
 
-# 2.2 App ID -> game_index
-game_indexer = StringIndexer(inputCol="appid", outputCol="game_index", handleInvalid="skip")
-game_indexer_model = game_indexer.fit(cleaned_df)
-cleaned_df = game_indexer_model.transform(cleaned_df)
-
-
-print('End of Phase 2')
+print('Phase 2 (Indexing) logic defined.')
 
 # Phase 3: Meta Feature Engineering
-# build vector feature needed by Cross-Attention for Query
-
-# 3.1 "Playtime Ratio" (time at review / time at all)
-cleaned_df = cleaned_df.withColumn(
-    "playtime_ratio",
-    F.when(F.col("author_playtime_forever") > 0,
-           F.col("author_playtime_at_review") / F.col("author_playtime_forever"))
+cleaned_lf = cleaned_lf.with_columns([
+    # 3.1 Playtime Ratio
+    pl.when(pl.col("author_playtime_forever") > 0)
+    .then(pl.col("author_playtime_at_review") / pl.col("author_playtime_forever"))
     .otherwise(0.0)
-)
+    .alias("playtime_ratio"),
 
-# 3.2 Log Transformation
-# use log1p (log(x+1)) to compress extremely big numbers
-cleaned_df = cleaned_df.withColumn("log_playtime_forever", F.log1p("author_playtime_forever"))
-cleaned_df = cleaned_df.withColumn("log_num_games", F.log1p("author_num_games_owned"))
-cleaned_df = cleaned_df.withColumn("log_num_reviews", F.log1p("author_num_reviews"))
+    # 3.2 Log Transformation
+    pl.col("author_playtime_forever").log1p().alias("log_playtime_forever"),
+    pl.col("author_num_games_owned").log1p().alias("log_num_games"),
+    pl.col("author_num_reviews").log1p().alias("log_num_reviews"),
 
-# 3.3 convert Boolean value to Int (0/1)
-cleaned_df = cleaned_df.withColumn("is_purchased", F.col("steam_purchase").cast(IntegerType()))
-cleaned_df = cleaned_df.withColumn("is_free", F.col("received_for_free").cast(IntegerType()))
+    # 3.3 Boolean -> Int (0/1)
+    pl.col("steam_purchase").cast(pl.Int32).alias("is_purchased"),
+    pl.col("received_for_free").cast(pl.Int32).alias("is_free"),
 
-# 3.4 Early Access & Recommendation (Context Features)
-# 'is_early_access' to represent as a context of content
-# 'voted_up' to examine the consistency of review.
-cleaned_df = cleaned_df.withColumn("is_early_access", F.col("written_during_early_access").cast(IntegerType()))
-cleaned_df = cleaned_df.withColumn("voted_recommend", F.col("voted_up").cast(IntegerType()))
+    # 3.4 Context Features -> Int(0/1)
+    pl.col("written_during_early_access").cast(pl.Int32).alias("is_early_access"),
+    pl.col("voted_up").cast(pl.Int32).alias("voted_recommend")
+])
 
-print('End of Phase 3')
+print('Phase 3 (Feature Eng) logic defined.')
 
-# Phase 4: Final selection and extraction
-# Select all columns needed by pytorch
-
-final_output = cleaned_df.select(
+# Phase 4: Final selection
+final_output_lf = cleaned_lf.select([
     # ID info
-    F.col("recommendationid").alias("review_id"),
-    F.col("user_index").cast("long"),  # Ensure Long type，PyTorch Embedding needed
-    F.col("game_index").cast("long"),  # Ensure Long type
+    pl.col("recommendationid").alias("review_id"),
+    pl.col("user_index"),
+    pl.col("game_index"),
 
     # Text info
-    "review",         # for longformer
+    pl.col("review"),
 
-    # Meta Features (Cross-Attention Query Part)
-    "playtime_ratio",
-    "log_playtime_forever",
-    "log_num_games",
-    "log_num_reviews",
-    "is_purchased",
-    "is_free",
-    "is_early_access",
-    "voted_recommend",
+    # Meta Features
+    pl.col("playtime_ratio"),
+    pl.col("log_playtime_forever"),
+    pl.col("log_num_games"),
+    pl.col("log_num_reviews"),
+    pl.col("is_purchased"),
+    pl.col("is_free"),
+    pl.col("is_early_access"),
+    pl.col("voted_recommend"),
 
-    #auxiliary data to select negative sample for memes
-    "votes_funny",
-    "votes_up",
+    # Auxiliary
+    pl.col("votes_funny"),
+    pl.col("votes_up"),
 
-    # target label
-    "weighted_vote_score" # Target Y
-)
+    # Target
+    pl.col("weighted_vote_score")
+])
+print('Phase 4 (Selection) logic defined.')
 
-print('End of Phase 4')
-#store as parquet
-final_output.write.mode("overwrite").parquet("processed_reviews_dataset.parquet")
+# Action
+print("Starting Streaming Execution... (Please wait)")
 
-print("Data processed, Schema：")
-final_output.printSchema()
-spark.stop()
+# sink_parquet will deal with data blocks in stream
+# the peak memory will be low to avoid OOM err
+try:
+    final_output_lf.sink_parquet(OUTPUT_PATH)
+    print(f"Success! Processed data saved to: {OUTPUT_PATH}")
+
+    # output checking
+    print("\nPreview of the first 5 rows:")
+    print(pl.read_parquet(OUTPUT_PATH).head(5))
+
+    # print schema to ensure types
+    print("\nSchema:")
+    print(pl.read_parquet_schema(OUTPUT_PATH))
+
+except Exception as e:
+    print(f"An error occurred: {e}")
